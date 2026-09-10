@@ -69,6 +69,7 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._reconnecting = False
         self._stomp_failures = 0      # consecutive STOMP connection failures
         self._stomp_disabled = False  # True once we give up on STOMP
+        self._stopped = False
         self.data: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -82,6 +83,9 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     async def async_stop(self) -> None:
         """Called when the config entry is unloaded."""
+        if self._stopped:
+            return
+        self._stopped = True
         self._reconnecting = True   # block new reconnects
         self._stomp_disabled = True
         if self._reconnect_task and not self._reconnect_task.done():
@@ -134,6 +138,10 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self._ws_connected = True
             self.update_interval = None  # STOMP is the source of truth; disable polling
         except Exception:
+            if not self.hass.is_running:
+                _LOGGER.debug("WebSocket connect failed during HA shutdown — ignoring")
+                self._stomp_disabled = True
+                return
             _LOGGER.warning("Failed to connect WebSocket — using polling", exc_info=True)
             self._ws_connected = False
             self._stomp_failures += 1
