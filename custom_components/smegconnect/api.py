@@ -7,7 +7,7 @@ from typing import Any
 import aiohttp
 
 from .auth import SmegAuth
-from .const import API_BASE, DEVICE_TYPE_COMMAND_VERSION
+from .const import API_BASE, DEVICE_TYPE_BLAST_CHILLER, DEVICE_TYPE_COMMAND_VERSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,13 +53,14 @@ class SmegApi:
         """Send a command to a device. Raises SmegApiError on non-202."""
         headers = await self._auth.get_headers()
         version = DEVICE_TYPE_COMMAND_VERSION.get(device_type_id, "3.0")
+        endpoint_version = "v2" if device_type_id == DEVICE_TYPE_BLAST_CHILLER else "v1"
         body = {
             "deviceCommandCode": command_code,
             "version": version,
             "deviceCommandParameterInstances": params or [],
         }
         async with self._session.post(
-            f"{API_BASE}/api/v1/devices/{device_code}/commands",
+            f"{API_BASE}/api/{endpoint_version}/devices/{device_code}/commands",
             headers=headers,
             json=body,
         ) as resp:
