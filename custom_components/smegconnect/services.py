@@ -38,6 +38,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             raise HomeAssistantError("Select at least one SmegConnect device target.")
 
         seconds_since_midnight = _seconds_since_midnight()
+        manual_clock_value = str(seconds_since_midnight)
 
         for coordinator, device_code in targets:
             device = coordinator.data.get(device_code)
@@ -55,19 +56,21 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     f"Clock sync is not supported for {device_type_name}."
                 )
 
-            await coordinator.api.send_command(
+            http_status = await coordinator.api.send_command(
                 device_code,
                 device_type_id,
                 CMD_MANUAL_CLOCK,
-                [{"parameterKey": "manualClock", "parameterValue": seconds_since_midnight}],
+                [{"parameterKey": "manualClock", "parameterValue": manual_clock_value}],
             )
             await coordinator.async_request_refresh()
 
-            _LOGGER.debug(
-                "Sent %s=%s to %s",
-                CMD_MANUAL_CLOCK,
-                seconds_since_midnight,
+            _LOGGER.info(
+                "Sent Smeg clock sync to %s (%s): %s=%s, HTTP %s",
                 device_code,
+                DEVICE_TYPE_NAMES.get(device_type_id, f"Device type {device_type_id}"),
+                CMD_MANUAL_CLOCK,
+                manual_clock_value,
+                http_status,
             )
 
     hass.services.async_register(DOMAIN, SERVICE_SYNC_CLOCK, _async_handle_sync_clock)

@@ -49,8 +49,8 @@ class SmegApi:
         device_type_id: int,
         command_code: str,
         params: list[dict[str, Any]] | None = None,
-    ) -> None:
-        """Send a command to a device. Raises SmegApiError on non-202."""
+    ) -> int:
+        """Send a command to a device and return the accepted HTTP status."""
         headers = await self._auth.get_headers()
         version = DEVICE_TYPE_COMMAND_VERSION.get(device_type_id, "3.0")
         endpoint_version = "v2" if device_type_id == DEVICE_TYPE_BLAST_CHILLER else "v1"
@@ -65,6 +65,7 @@ class SmegApi:
             json=body,
         ) as resp:
             await _check(resp, expected_range=(200, 202))
+            return resp.status
 
 
 async def _check(
