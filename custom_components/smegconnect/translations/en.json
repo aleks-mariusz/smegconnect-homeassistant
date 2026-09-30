@@ -18,5 +18,11 @@
     "abort": {
       "already_configured": "This Smeg account is already configured."
     }
+  },
+  "services": {
+    "sync_clock": {
+      "name": "Sync appliance clock",
+      "description": "Sync the targeted appliance clock to Home Assistant local time."
+    }
   }
 }
