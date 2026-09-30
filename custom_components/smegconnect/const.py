@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 DOMAIN = "smegconnect"
+SERVICE_SYNC_CLOCK = "sync_clock"
 
 API_BASE = "https://smegcons.prod-platform.smegconnect.com"
 TENANT = "smegcons"
@@ -266,6 +267,7 @@ CMD_WATER_HARDNESS = "waterHardnessFeature"
 CMD_TEMP_FORMAT = "tempFormatFeature"      # param: tempFormat; oven="°C"/"°F", chiller="0"/"1"
 CMD_HOUR_FORMAT = "hourFormatFeature"      # param: hourFormat; oven="24h"/"12h", chiller="0"/"1"
 CMD_WEIGHT_FORMAT = "weightFormatFeature"  # param: weightFormat; oven="kg"/"oz", chiller="0"/"1"
+CMD_MANUAL_CLOCK = "manualClockFeature"
 
 # Blast chiller command codes (confirmed from SmegConnect Plus live capture)
 CMD_CHILLER_APPL = "applRemCmdFeature"     # blast chiller on/off; param: applRemCmd, "1"/"0"
