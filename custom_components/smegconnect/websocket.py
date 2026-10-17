@@ -10,6 +10,7 @@ STOMP frames are sent and received as plain WebSocket text messages.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -151,9 +152,14 @@ class SmegWebSocket:
     async def async_disconnect(self) -> None:
         """Close the WebSocket cleanly. Does NOT trigger the disconnect callback."""
         self._running = False
+        current = asyncio.current_task()
+        tasks = []
         for task in (self._heartbeat_task, self._listen_task):
-            if task:
+            if task and task is not current:
                 task.cancel()
+                tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._heartbeat_task = None
         self._listen_task = None
         if self._ws and not self._ws.closed:
@@ -181,7 +187,8 @@ class SmegWebSocket:
                 if not text:        # heartbeat — skip
                     continue
                 return _parse_stomp(text)
-            if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+            if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
+                            aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 return None
 
     async def _listen(self) -> None:
@@ -195,27 +202,31 @@ class SmegWebSocket:
         except asyncio.CancelledError:
             return
         except Exception:
-            _LOGGER.debug("WebSocket listener error", exc_info=True)
+            _LOGGER.warning("Smeg WebSocket listener failed", exc_info=True)
         finally:
             if self._running:
-                self._running = False
+                # Stop heartbeat and close the socket before handing recovery
+                # to the coordinator. Intentional disconnects skip this path.
+                await self.async_disconnect()
                 await self._on_disconnect(None)
 
     async def _dispatch(self, frame: dict[str, Any]) -> None:
         cmd = frame["command"]
         if cmd == "MESSAGE":
             try:
-                import json
                 payload = json.loads(frame["body"])
-                await self._on_message(payload)
-            except Exception:
-                _LOGGER.debug("Could not parse MESSAGE body: %s", frame["body"][:100])
+            except (ValueError, TypeError):
+                _LOGGER.warning("Invalid JSON in Smeg STOMP MESSAGE")
+                return
+            if not isinstance(payload, dict):
+                _LOGGER.warning("Non-object Smeg STOMP MESSAGE")
+                return
+            # Callback errors are integration failures, not JSON parse errors.
+            await self._on_message(payload)
         elif cmd == "ERROR":
             msg = frame["headers"].get("message", frame["body"][:100])
             _LOGGER.warning("STOMP ERROR from server: %s — will reconnect", msg)
-            if self._running:
-                self._running = False
-                await self._on_disconnect(None)
+            raise ConnectionError(f"STOMP ERROR: {msg}")
         elif cmd == "RECEIPT":
             pass    # not requested, ignore
         else:
@@ -231,4 +242,7 @@ class SmegWebSocket:
         except asyncio.CancelledError:
             pass
         except Exception:
-            _LOGGER.debug("Heartbeat task ended", exc_info=True)
+            _LOGGER.warning("Smeg heartbeat failed — closing WebSocket", exc_info=True)
+            if self._ws and not self._ws.closed:
+                # Wake the listener; it owns the single disconnect notification.
+                await self._ws.close()

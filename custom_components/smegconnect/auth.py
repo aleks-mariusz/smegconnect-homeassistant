@@ -117,13 +117,23 @@ class SmegAuth:
             REFRESH_ENDPOINT,
             json={"refreshToken": self._refresh_token},
             headers={"x-tenant": TENANT, "Content-Type": "application/json;charset=UTF-8"},
+            timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             if resp.status != 200:
                 raise SmegAuthError(f"Token refresh failed with HTTP {resp.status}")
             data = await resp.json()
 
-        self._access_token = data["accessToken"]
-        self._refresh_token = data["refreshToken"]
+        # Smeg normally returns only accessToken on refresh (verified live).
+        # Keep the existing refresh token unless the server explicitly rotates
+        # it. Validate before changing either field so failures are atomic.
+        access_token = data.get("accessToken")
+        refresh_token = data.get("refreshToken", self._refresh_token)
+        if not isinstance(access_token, str) or not access_token:
+            raise SmegAuthError("Token refresh response has no valid accessToken")
+        if not isinstance(refresh_token, str) or not refresh_token:
+            raise SmegAuthError("Token refresh response has no valid refreshToken")
+        self._access_token = access_token
+        self._refresh_token = refresh_token
 
         if self.on_tokens_refreshed is not None:
             try:

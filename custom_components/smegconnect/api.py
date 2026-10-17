@@ -27,7 +27,8 @@ class SmegApi:
         """Return all devices enrolled to this account."""
         headers = await self._auth.get_headers()
         async with self._session.get(
-            f"{API_BASE}/api/v1/devices", headers=headers
+            f"{API_BASE}/api/v1/devices", headers=headers,
+            timeout=aiohttp.ClientTimeout(total=20),
         ) as resp:
             await _check(resp)
             data = await resp.json()
@@ -38,7 +39,8 @@ class SmegApi:
         """Return full device info including state and availableCommands."""
         headers = await self._auth.get_headers()
         async with self._session.get(
-            f"{API_BASE}/api/v1/devices/{device_code}/info", headers=headers
+            f"{API_BASE}/api/v1/devices/{device_code}/info", headers=headers,
+            timeout=aiohttp.ClientTimeout(total=20),
         ) as resp:
             await _check(resp)
             return await resp.json()

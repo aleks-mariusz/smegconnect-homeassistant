@@ -4,7 +4,7 @@
 
 An unofficial Home Assistant integration for Smeg smart appliances — ovens, blast chillers, dishwashers, and wine coolers — connected via the SmegConnect cloud platform.
 
-> **Status:** Pre-release / beta. Tested on SOP6606WS2PNR (oven) and SBC4604WNR1 (blast chiller). Reverse-engineered from the SmegConnect and SmegConnect Plus Android apps.
+> **Status:** Early release. Tested on SOP6606WS2PNR (oven) and SBC4604WNR1 (blast chiller). Reverse-engineered from the SmegConnect and SmegConnect Plus Android apps.
 
 ---
 
@@ -15,6 +15,22 @@ SmegConnect is Smeg's cloud platform for controlling smart appliances remotely v
 **Architecture:** `HA → Smeg Cloud REST API + STOMP/WebSocket → AWS IoT MQTT → Appliance`
 
 The appliance connects outbound to the Smeg cloud; there is no supported local control API after provisioning.
+
+### Connection recovery
+
+Real-time WebSocket updates are backed by independent REST reconciliation every
+60 seconds (10 seconds while disconnected). Push traffic cannot postpone these
+checks, so one appliance's updates cannot conceal missing updates from another.
+After 180 seconds without a valid device push, the socket is replaced. Failed
+connections retry automatically with 30–300 second exponential backoff; retries
+never permanently disable themselves. Diagnostics include connection status,
+retry count, and ages of the latest REST refresh and device push.
+Token renewal accepts Smeg's access-token-only responses and retains the existing
+refresh token unless the server rotates it.
+
+This addresses integration transport freezes. An oven can separately publish a
+frozen cavity temperature while in standby; REST cannot recover a measurement
+the appliance itself no longer updates.
 
 ---
 

@@ -65,8 +65,11 @@ POST /api/v1/auth/refreshToken
 x-tenant: smegcons
 
 Body: {"refreshToken": "<refreshToken>"}
-Response 200: {"accessToken": "...", "refreshToken": "..."}
+Response 200: {"accessToken": "..."}
 ```
+
+Verified 2026-10-17: refresh responses omit `refreshToken`. Keep the existing
+refresh token, replacing it only if a response explicitly supplies a new one.
 
 ### Required headers (all authenticated requests)
 

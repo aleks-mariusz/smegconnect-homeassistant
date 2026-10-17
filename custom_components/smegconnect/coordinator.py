@@ -2,7 +2,7 @@
 
 State delivery:
   Primary:  STOMP WebSocket push (real-time, ~1-5s latency)
-  Fallback: REST polling every 10s when WebSocket is unavailable
+  Reconciliation: REST every 60s, or every 10s when WebSocket is unavailable
 
 self.data layout:
   {
@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from time import monotonic
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -38,12 +39,12 @@ from .websocket import SmegWebSocket
 _LOGGER = logging.getLogger(__name__)
 
 _POLL_INTERVAL_POLL = timedelta(seconds=10)   # when falling back to polling (STOMP down)
+_POLL_INTERVAL_PUSH = timedelta(seconds=60)   # independent of incoming pushes
+_PUSH_SILENCE_TIMEOUT = 180
 
 # Seconds before the first reconnect attempt; doubles each time (30 → 60 → 120 → 240 …)
 _RECONNECT_INITIAL   = 30
 _RECONNECT_MAX       = 300
-# Stop retrying STOMP after this many consecutive failures and use polling only
-_MAX_STOMP_FAILURES  = 3
 
 
 class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
@@ -59,7 +60,7 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             hass,
             _LOGGER,
             name="smeg",
-            update_interval=_POLL_INTERVAL_POLL,  # overridden to None once STOMP connects
+            update_interval=_POLL_INTERVAL_POLL,
         )
         self.auth = auth
         self.api = api
@@ -68,8 +69,10 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._reconnect_task: asyncio.Task | None = None
         self._reconnecting = False
         self._stomp_failures = 0      # consecutive STOMP connection failures
-        self._stomp_disabled = False  # True once we give up on STOMP
         self._stopped = False
+        self._last_ws_message: float | None = None
+        self._last_rest_update: float | None = None
+        self._push_generation: dict[str, int] = {}
         self.data: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -87,7 +90,6 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             return
         self._stopped = True
         self._reconnecting = True   # block new reconnects
-        self._stomp_disabled = True
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
             try:
@@ -96,24 +98,41 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 pass
         if self._ws:
             await self._ws.async_disconnect()
+        await self.async_shutdown()
 
     # ------------------------------------------------------------------
     # DataUpdateCoordinator override (polling fallback)
     # ------------------------------------------------------------------
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
-        if self._ws_connected:
+        if self._stopped:
             return self.data
+
+        if (
+            self._ws_connected
+            and self._last_ws_message is not None
+            and monotonic() - self._last_ws_message > _PUSH_SILENCE_TIMEOUT
+        ):
+            _LOGGER.warning("Smeg WebSocket has no device messages for %ds — reconnecting",
+                            _PUSH_SILENCE_TIMEOUT)
+            if self._ws:
+                await self._ws.async_disconnect()
+            self._record_ws_failure()
 
         for code in list(self.data):
             try:
+                generation = self._push_generation.get(code, 0)
                 info = await self.api.get_device_info(code)
+                # A newer push can arrive while the HTTP request is in flight.
+                if generation != self._push_generation.get(code, 0):
+                    continue
                 state = info.get("highLevelDeviceStatus", {}).get("status", {})
                 if self.data[code].get("deviceTypeId") == DEVICE_TYPE_BLAST_CHILLER:
                     state = self._apply_blast_chiller_bit_map(state)
                 self.data[code]["state"] = state
             except SmegApiError as err:
                 raise UpdateFailed(f"Failed to poll {code}: {err}") from err
+        self._last_rest_update = monotonic()
         return self.data
 
     # ------------------------------------------------------------------
@@ -121,7 +140,7 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     # ------------------------------------------------------------------
 
     async def _start_websocket(self) -> None:
-        if self._stomp_disabled:
+        if self._stopped:
             return
         if self._ws:
             await self._ws.async_disconnect()
@@ -136,105 +155,93 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         try:
             await self._ws.async_connect()
             self._ws_connected = True
-            self.update_interval = None  # STOMP is the source of truth; disable polling
+            self._last_ws_message = monotonic()
+            self.update_interval = _POLL_INTERVAL_PUSH
+        except asyncio.CancelledError:
+            await self._ws.async_disconnect()
+            raise
         except Exception:
-            if not self.hass.is_running:
-                _LOGGER.debug("WebSocket connect failed during HA shutdown — ignoring")
-                self._stomp_disabled = True
+            await self._ws.async_disconnect()
+            if self._stopped or self.hass.is_stopping:
                 return
             _LOGGER.warning("Failed to connect WebSocket — using polling", exc_info=True)
-            self._ws_connected = False
-            self._stomp_failures += 1
-            self._check_stomp_failure_limit()
+            self._record_ws_failure()
 
-    def _check_stomp_failure_limit(self) -> None:
-        """After too many failures, give up on STOMP permanently (until HA restart)."""
-        if self._stomp_failures >= _MAX_STOMP_FAILURES and not self._stomp_disabled:
-            self._stomp_disabled = True
-            self.update_interval = _POLL_INTERVAL_POLL
-            _LOGGER.warning(
-                "Smeg STOMP WebSocket failed %d times in a row — "
-                "switching to %ds REST polling only. "
-                "The server may be rate-limiting after a previous connection storm. "
-                "Restart Home Assistant to retry WebSocket.",
-                self._stomp_failures,
-                _POLL_INTERVAL_POLL.seconds,
-            )
+    def _record_ws_failure(self) -> None:
+        self._ws_connected = False
+        self.update_interval = _POLL_INTERVAL_POLL
+        self._stomp_failures += 1
+        self._schedule_reconnect()
 
     async def _on_ws_disconnect(self, _payload: None) -> None:
         """Called by SmegWebSocket when the connection drops or gets a STOMP ERROR."""
-        self._ws_connected = False
-        self.update_interval = _POLL_INTERVAL_POLL   # poll faster while STOMP is down
-        self._stomp_failures += 1
-        self._check_stomp_failure_limit()
-
-        if self._stomp_disabled or self._reconnecting:
+        if self._stopped:
             return
-
+        self._record_ws_failure()
         _LOGGER.warning(
-            "Smeg WebSocket disconnected (failure %d/%d) — scheduling reconnect",
+            "Smeg WebSocket disconnected (failure %d) — REST polling and automatic retry",
             self._stomp_failures,
-            _MAX_STOMP_FAILURES,
         )
-        self._schedule_reconnect()
+        # Setting update_interval does NOT schedule a timer in HA. Explicitly
+        # refresh so fallback starts even when the previous timer was absent.
+        await self.async_request_refresh()
 
     async def _on_ws_message(self, payload: dict[str, Any]) -> None:
         """Called by SmegWebSocket on each inbound state push."""
-        # Receiving a real message means STOMP is healthy — reset failure counter
-        self._stomp_failures = 0
-
         _LOGGER.debug("STOMP MESSAGE payload keys=%s", list(payload.keys()))
 
         device_code = payload.get("deviceCode")
         status = payload.get("status")
-        if not device_code or not status:
+        if self._stopped or not device_code or not isinstance(status, dict) or not status:
             return
         if device_code not in self.data:
             _LOGGER.debug("State push for unknown device %s — ignoring", device_code)
             return
 
+        self._stomp_failures = 0
+        self._last_ws_message = monotonic()
+        self._push_generation[device_code] = self._push_generation.get(device_code, 0) + 1
         if self.data[device_code].get("deviceTypeId") == DEVICE_TYPE_BLAST_CHILLER:
             status = self._apply_blast_chiller_bit_map(status)
         self.data[device_code]["state"] = status
-        self.async_set_updated_data(self.data)
+        # async_set_updated_data resets the REST timer on every push: a chatty
+        # device would starve reconciliation for another device missing pushes.
+        self.last_update_success = True
+        self.async_update_listeners()
 
     def _schedule_reconnect(self) -> None:
-        if self._reconnecting or self._stomp_disabled:
+        if self._reconnecting or self._stopped:
             return
         if self._reconnect_task and not self._reconnect_task.done():
             return
-        self._reconnect_task = self.hass.async_create_task(
+        self._reconnect_task = self.hass.async_create_background_task(
             self._reconnect_loop(), name="smeg_ws_reconnect"
         )
 
     async def _reconnect_loop(self) -> None:
         self._reconnecting = True
-        delay = _RECONNECT_INITIAL
         try:
-            while not self._stomp_disabled:
+            while not self._stopped:
+                delay = min(_RECONNECT_INITIAL * 2 ** min(max(self._stomp_failures - 1, 0), 4),
+                            _RECONNECT_MAX)
                 _LOGGER.debug("WebSocket reconnect in %ds", delay)
                 await asyncio.sleep(delay)
                 try:
                     await self._start_websocket()
                     if self._ws_connected:
-                        await self._fetch_all_devices()
+                        await self.async_request_refresh()
                         # Re-check: a STOMP ERROR frame can arrive during the fetch
                         # (listen task runs while we await HTTP). If it did, _ws_connected
                         # is now False — loop back and try again rather than falsely
                         # declaring success.
                         if not self._ws_connected:
-                            delay = min(delay * 2, _RECONNECT_MAX)
                             continue
-                        self.async_set_updated_data(self.data)
                         _LOGGER.info("Smeg WebSocket reconnected successfully")
-                        return
-                    if self._stomp_disabled:
                         return
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     _LOGGER.debug("Reconnect attempt failed", exc_info=True)
-                delay = min(delay * 2, _RECONNECT_MAX)
         except asyncio.CancelledError:
             pass
         finally:
