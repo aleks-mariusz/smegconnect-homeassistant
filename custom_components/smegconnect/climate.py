@@ -105,6 +105,10 @@ class SmegOvenClimate(SmegEntity, ClimateEntity):
 
     @property
     def current_temperature(self) -> float | None:
+        # Oven CB freezes currTempOven in standby (firmware defect); the
+        # coordinator flags it stale past the grace window.
+        if self._state.get("cavityTempStale"):
+            return None
         val = self._state.get("currTempOven")
         try:
             return float(val)

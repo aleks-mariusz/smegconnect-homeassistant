@@ -1,6 +1,8 @@
 """Constants for the SmegConnect integration."""
 from __future__ import annotations
 
+from datetime import timedelta
+
 DOMAIN = "smegconnect"
 SERVICE_SYNC_CLOCK = "sync_clock"
 
@@ -366,6 +368,25 @@ STANDARD_HEADERS = {
 OVEN_MIN_TEMP = 30
 OVEN_MAX_TEMP = 280
 OVEN_TEMP_STEP = 5
+
+# Cavity-temperature staleness handling (device firmware defect).
+#
+# After a program ends and the oven enters standby, the CB stops refreshing
+# currTempOven in its published status snapshots (verified 2026-10-05/06:
+# every other field keeps updating in fresh 60s snapshots; the value only
+# revives at the next program start or a CB reboot). See
+# cavity-temp-freeze-analysis.md in the project repo for the full evidence.
+#
+# At the standby transition the value is still the real cavity temperature;
+# it stays plausible while the oven could genuinely be hot (cool-down from
+# OVEN_MAX_TEMP takes well under an hour), so we keep reporting it through a
+# grace window and then report 'unknown' rather than a fossil reading.
+CAVITY_TEMP_STALE_GRACE = timedelta(minutes=90)
+# Above this, a standby-phase cavity reading is treated as a frozen fossil
+# when the transition was not observed (e.g. HA restarted mid-freeze).
+# Errs high: a plausible-but-suppressed warm reading costs little; a fossil
+# 200° reading fools automations and history graphs.
+CAVITY_TEMP_MAX_PLAUSIBLE_STANDBY = 45.0
 
 # Platforms to set up per config entry
 PLATFORMS = ["sensor", "binary_sensor", "switch", "climate", "number", "select"]

@@ -30,10 +30,17 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import SmegApi, SmegApiError
 from .auth import SmegAuth
-from .const import BLAST_CHILLER_ALARM_MAP, BLAST_CHILLER_BIT_MAP, DEVICE_TYPE_BLAST_CHILLER
+from .const import (
+    BLAST_CHILLER_ALARM_MAP,
+    BLAST_CHILLER_BIT_MAP,
+    CAVITY_TEMP_STALE_GRACE,
+    DEVICE_TYPE_BLAST_CHILLER,
+    DEVICE_TYPE_OVEN,
+)
 from .websocket import SmegWebSocket
 
 _LOGGER = logging.getLogger(__name__)
@@ -73,6 +80,7 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._last_ws_message: float | None = None
         self._last_rest_update: float | None = None
         self._push_generation: dict[str, int] = {}
+        self._prev_cb_uptime: dict[str, int] = {}   # CB reboot detection per device
         self.data: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
@@ -129,6 +137,7 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 state = info.get("highLevelDeviceStatus", {}).get("status", {})
                 if self.data[code].get("deviceTypeId") == DEVICE_TYPE_BLAST_CHILLER:
                     state = self._apply_blast_chiller_bit_map(state)
+                self._update_cavity_temp_freshness(code, state)
                 self.data[code]["state"] = state
             except SmegApiError as err:
                 raise UpdateFailed(f"Failed to poll {code}: {err}") from err
@@ -203,6 +212,7 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._push_generation[device_code] = self._push_generation.get(device_code, 0) + 1
         if self.data[device_code].get("deviceTypeId") == DEVICE_TYPE_BLAST_CHILLER:
             status = self._apply_blast_chiller_bit_map(status)
+        self._update_cavity_temp_freshness(device_code, status)
         self.data[device_code]["state"] = status
         # async_set_updated_data resets the REST timer on every push: a chatty
         # device would starve reconciliation for another device missing pushes.
@@ -250,6 +260,113 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _update_cavity_temp_freshness(self, device_code: str, state: dict[str, Any]) -> None:
+        """Track currTempOven staleness for ovens (firmware freeze defect).
+
+        The CB stops refreshing currTempOven when a program ends and the oven
+        enters standby; the stale value then persists in every snapshot until
+        the next program start or a CB reboot. This annotates the state dict
+        with freshness info entities use to avoid presenting a fossil:
+
+          cavityTempStale         bool   — True when the reading must not be
+                                           presented as a measurement
+          cavityTempStaleSince    str    — ISO timestamp when staleness began
+                                           (the standby transition, or startup
+                                           when it was already stale then)
+          cavityTempLastAccurate  float  — last trusted reading (attribute)
+
+        The value is trusted while a program is running (the device refreshes
+        it every few seconds), during a grace window after the standby
+        transition (it is still the real, recently-measured temperature), and
+        whenever the value or CBupTime proves the model was refreshed.
+        """
+        device = self.data.get(device_code, {})
+        if device.get("deviceTypeId") != DEVICE_TYPE_OVEN:
+            return
+
+        now = dt_util.utcnow()
+        prev = device.get("state", {})
+
+        try:
+            temp = float(state["currTempOven"])
+        except (KeyError, TypeError, ValueError):
+            # No usable reading — drop any bookkeeping, nothing to annotate.
+            state.pop("cavityTempStale", None)
+            return
+
+        phase = str(state.get("currStepCookingPhase", "standby")).lower()
+        try:
+            cb_uptime = int(state.get("CBupTime", 0))
+        except (TypeError, ValueError):
+            cb_uptime = 0
+        prev_cb_uptime = self._prev_cb_uptime.get(device_code)
+        self._prev_cb_uptime[device_code] = cb_uptime
+        rebooted = (
+            prev_cb_uptime is not None
+            and cb_uptime < prev_cb_uptime
+        )
+
+        prior_temp = prev.get("currTempOven")
+        value_changed = prior_temp is not None and temp != prior_temp
+
+        prev_phase = str(prev.get("currStepCookingPhase", "")).lower() if prev else None
+
+        if phase != "standby":
+            # Program running — device refreshes the temperature continuously.
+            device["cavityTempTracker"] = {}
+            state["cavityTempStale"] = False
+            state.pop("cavityTempStaleSince", None)
+            state["cavityTempLastAccurate"] = temp
+            return
+
+        # --- Standby ---
+        tracker = device.get("cavityTempTracker") or {}
+        if prev_phase not in (None, "standby"):
+            # Transition into standby observed in real time: the reading is
+            # accurate at this instant; start the grace window. (A temperature
+            # difference from the last cooking sample is normal end-of-program
+            # progression, not a revival.)
+            tracker = {
+                "since": now,
+                "observed_transition": True,
+                "last_accurate": temp,
+            }
+        elif rebooted or value_changed:
+            # Already in standby and the value moved (or the CB restarted):
+            # the model was refreshed — the reading is live again.
+            tracker = {}
+        elif not tracker:
+            # Already in standby with no tracker (startup, or tracker lost on
+            # reconnect): age unknown. Plausible-ambient readings are harmless
+            # whether frozen or live; elevated ones are fossils by definition.
+            tracker = {
+                "since": now,
+                "observed_transition": False,
+                "stale": temp > CAVITY_TEMP_MAX_PLAUSIBLE_STANDBY,
+                "last_accurate": temp,
+            }
+
+        grace_expired = (
+            tracker.get("observed_transition")
+            and now - tracker["since"] > CAVITY_TEMP_STALE_GRACE
+        )
+        if grace_expired:
+            if not tracker.get("stale"):
+                _LOGGER.debug(
+                    "Device %s: cavity temperature stale since %s (grace expired)",
+                    device_code,
+                    tracker["since"].isoformat(),
+                )
+            tracker["stale"] = True
+
+        device["cavityTempTracker"] = tracker
+        state["cavityTempStale"] = bool(tracker.get("stale"))
+        if tracker.get("stale"):
+            state["cavityTempStaleSince"] = tracker["since"].isoformat()
+        else:
+            state.pop("cavityTempStaleSince", None)
+        state["cavityTempLastAccurate"] = tracker.get("last_accurate", temp)
 
     @staticmethod
     def _apply_blast_chiller_bit_map(state: dict[str, Any]) -> dict[str, Any]:

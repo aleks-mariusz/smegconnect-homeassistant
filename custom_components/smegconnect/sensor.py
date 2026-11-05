@@ -393,6 +393,13 @@ class SmegSensorEntity(SmegEntity, SensorEntity):
         value = self._state.get(self.entity_description.state_field)
         key = self.entity_description.key
 
+        # --- Cavity temperature (firmware staleness defect) ---
+        # The oven CB stops refreshing currTempOven at the standby transition;
+        # past the grace window the reading is a fossil. Report 'unknown' and
+        # keep the last trusted value in attributes (see coordinator).
+        if key == "cavity_temperature" and self._state.get("cavityTempStale"):
+            return None
+
         # --- Meat probe temperature ---
         # Return None when probe is not electrically connected.
         # Oven: meatProbeInserted = string ("meat probe not inserted as expected")
@@ -447,3 +454,28 @@ class SmegSensorEntity(SmegEntity, SensorEntity):
             return self.entity_description.value_fn(value)
 
         return value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Cavity-temperature staleness context (see coordinator tracker).
+
+        Only ovens carry the tracker fields; other devices get no attributes.
+        """
+        if self.entity_description.key != "cavity_temperature":
+            return None
+        if "cavityTempStale" not in self._state and "cavityTempLastAccurate" not in self._state:
+            return None
+        attrs: dict[str, Any] = {}
+        if self._state.get("cavityTempStale"):
+            attrs["stale"] = True
+            attrs["stale_since"] = self._state.get("cavityTempStaleSince")
+            attrs["note"] = (
+                "Oven firmware stops updating cavity temperature in standby; "
+                "this reading is frozen and suppressed"
+            )
+        else:
+            attrs["stale"] = False
+        last_accurate = self._state.get("cavityTempLastAccurate")
+        if last_accurate is not None:
+            attrs["last_accurate_value"] = last_accurate
+        return attrs
