@@ -4,7 +4,7 @@
 
 An unofficial Home Assistant integration for Smeg smart appliances — ovens, blast chillers, dishwashers, and wine coolers — connected via the SmegConnect cloud platform.
 
-> **Status:** Early release. Tested on SOP6606WS2PNR (oven) and SBC4604WNR1 (blast chiller). Reverse-engineered from the SmegConnect and SmegConnect Plus Android apps.
+> **Status:** Pre-release / beta. Tested on SOP6606WS2PNR (oven) and SBC4604WNR1 (blast chiller). Reverse-engineered from the SmegConnect and SmegConnect Plus Android apps.
 
 ---
 
@@ -28,9 +28,11 @@ retry count, and ages of the latest REST refresh and device push.
 Token renewal accepts Smeg's access-token-only responses and retains the existing
 refresh token unless the server rotates it.
 
-This addresses integration transport freezes. An oven can separately publish a
-frozen cavity temperature while in standby; REST cannot recover a measurement
-the appliance itself no longer updates.
+An oven can separately publish a frozen cavity temperature while in standby;
+REST cannot recover a measurement the appliance itself no longer updates. The
+integration suppresses such fossils: the reading is trusted during a program
+and for a 90-minute cool-down window after it ends, then reported as `unknown`
+(see Known quirks below).
 
 ---
 
@@ -40,7 +42,7 @@ Smeg publishes two companion apps — **SmegConnect** (ovens, dishwashers, wine 
 
 The apps differ in their API version: SmegConnect uses v1 endpoints while SmegConnect Plus uses v2. The main practical difference is how device state is encoded — ovens expose readable named fields (`doorState`, `childlock`, `appl`), whereas blast chillers use compact bit arrays (`applState1_*`, `applState2_*`) that require decoding. This integration handles that decoding automatically using the bit map extracted from the SmegConnect Plus APK.
 
-**This integration uses v1 endpoints for everything.** The v1 device listing returns all enrolled appliances regardless of which app provisioned them, and v1 commands work for both ovens and blast chillers. You do not need to provision devices via any particular app — whichever app you used to set up your appliance, this integration will find and control it.
+**This integration uses v1 endpoints for device listing and state, and v2 for blast chiller commands.** The v1 device listing returns all enrolled appliances regardless of which app provisioned them. You do not need to provision devices via any particular app — whichever app you used to set up your appliance, this integration will find and control it.
 
 For the full API and protocol details — endpoints, command codes, state fields, bit decoding — see [PROTOCOL.md](PROTOCOL.md).
 
@@ -64,7 +66,7 @@ For the full API and protocol details — endpoints, command codes, state fields
 
 ### Manual
 
-Copy `custom_components/smeg/` to your HA `config/custom_components/smeg/` directory and restart.
+Copy `custom_components/smegconnect/` to your HA `config/custom_components/smegconnect/` directory and restart.
 
 ---
 
@@ -92,10 +94,12 @@ Devices are named using the full commercial product code, e.g.:
 | `sensor` | Cooking Elapsed / Remaining | Time into / left in the current cooking cycle |
 | `sensor` | Cooking Phase | standby / preheating / cooking / cooling |
 | `binary_sensor` | Door | Open/Closed |
+| `binary_sensor` | Busy | Whether the oven is actively executing a command |
 | `binary_sensor` | Meat Probe Connected | Whether the meat probe is physically plugged in |
 | `sensor` | Meat Probe Temperature | Probe temperature (only when connected) |
 | `switch` | Light | Oven cavity light |
 | `switch` | Keep Warm | Keep-warm mode after cooking |
+| `button` | Stop Cooking | Immediately stop the running cooking program |
 | `number` | Timer 1/2/3 | Countdown timers (seconds) |
 | `number` | Water Hardness | Limescale setting for steam boiler (1–5) |
 | **Configuration** | | |
@@ -117,9 +121,15 @@ Devices are named using the full commercial product code, e.g.:
 
 | Platform | Entity | Description |
 |---|---|---|
+| `switch` | Power | Turn the blast chiller on/off |
 | `sensor` | Cavity Temperature | Current cavity temperature (°C) |
-| `sensor` | Step 1/2/3 Target Temperature | Chilling program step targets |
+| `sensor` | Step 1 Target Temperature | Step 1 chilling target (read-only view of the number entity) |
 | `sensor` | Meat Probe Temperature | When probe connected |
+| `sensor` | Program | Currently running program name (e.g. "Slow Cooking") |
+| `sensor` | Cycle Phase | Standby / Pre-cooling / Running / Keep Cold / Ended / etc. |
+| `sensor` | Current Step | None / Pre / Step 1 / Step 2 / Step 3 |
+| `sensor` | Elapsed Time | Time elapsed in current program |
+| `sensor` | Total Duration | Total program duration |
 | `binary_sensor` | Meat Probe Connected | Probe insertion status |
 | `binary_sensor` | Door | Open/Closed — decoded from `applState1_002` |
 | `binary_sensor` | Child Lock Active | Lock state — decoded from `applState2_001` |
@@ -133,8 +143,55 @@ Devices are named using the full commercial product code, e.g.:
 | `select` | Temperature Format, Clock Format, Weight Format, Clock Font | Display settings |
 | `switch` | Sound | Audible alerts |
 | `switch` | Child Lock | Panel lockout |
+| `button` | Stop Program | Immediately stop the running program |
 
 > **Note:** Door state for the blast chiller comes from `applState1_002` (not `applState2_*`), decoded from the SmegConnect Plus APK source (`BlastChillerStatusKt.java`). Confirmed present in live v1 API responses.
+
+---
+
+## Services
+
+Starting a cooking program requires multiple parameters and is exposed as an HA service rather than a UI entity. This makes it easy to call from automations and scripts with full control over all settings.
+
+### `smegconnect.start_oven_program`
+
+Starts a cooking program on a Smeg oven. Sends the program selection, all cooking setpoints, then the start command in sequence — matching exactly what the SmegConnect app sends.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `seq_id` | integer | yes | Program ID from the oven's program table (see below) |
+| `temperature` | integer | yes | Step 1 target temperature (°C) |
+| `duration` | integer | no | Step 1 duration in seconds; `0` = run until target temperature reached |
+| `rapid_preheat` | boolean | no | Enable rapid preheat (default: false) |
+| `delay_time` | integer | no | Pre-start delay in seconds (default: 0) |
+| `steam_level` | integer 0–3 | no | Steam intensity: 0=off, 1–3=low/medium/high (for steam ovens) |
+| `vapor_level` | integer | no | Humidity injection level (program-dependent) |
+| `meat_probe_temp` | integer | no | If set, activates meat probe mode; target temperature in °C |
+
+**Common oven program IDs:** Fan Assisted=1–3, Grill=14, Static=10, Pyrolytic=165, Plate Warming=158, Keep Warm=160, Proving=157, Steam Reheat=159. See `commands_services_design.md` for the complete list.
+
+### `smegconnect.start_blast_chiller_program`
+
+Starts a program on a Smeg blast chiller. Covers cold programs (blast chilling, freezing) and hot programs (slow cooking, heating, proving).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `seq_id` | integer | yes | Program ID (1–10 for manual programs; see table below) |
+| `temperature` | integer | yes | Target temperature in °C (negative for cold programs) |
+| `duration` | integer | no | Duration in seconds; `0` = auto-calculated from food weight |
+| `food_weight_in_grams` | integer 0–500 | no | Food weight in grams (10g steps); used to compute automatic duration |
+| `meat_probe_mode` | integer 0–1 | no | `0`=not used (default), `1`=stop when probe reaches target temperature |
+| `meat_probe_temp` | integer | no | Probe target temperature in °C (used when `meat_probe_mode=1`) |
+| `keep_warm_temp` | integer | no | Temperature to hold after the cycle ends; `0`=disabled |
+| `rapid_preheat_cool` | boolean | no | Enable rapid pre-cooling/pre-heating (default: false) |
+
+**Program IDs:** 1=Blast Chilling, 2=Freezing, 3=Drinks Cooling, 4=Conservation, 5=Pre-Cooling, 6=Slow Cooking, 7=Heating, 8=Proving, 9=Defrost by Time, 10=Ready to Eat.
+
+### `smegconnect.sync_clock`
+
+Synchronises the appliance's internal clock to Home Assistant's current time. The official app sends this on every startup. Useful to wire to an automation on HA startup or a daily schedule.
+
+No fields required — the handler computes the current time automatically.
 
 ---
 
@@ -205,12 +262,12 @@ All 80 SmegConnect/SmegConnect Plus supported models are in the integration's ca
 - **Oven 2 (4G AUX variant)** — devices with a CB v0.0.0 or 4G auxiliary module may not provision via the standard flow. Contact Smeg support.
 - **PARSW number** (e.g. PARSW0436) — this is static ADF metadata not returned by the live API; only the PARSW version number is available.
 - **Firmware upgrade status** — no sensor for pending OTA updates; planned for a future release.
+- **Cavity temperature freezes in standby** (oven firmware defect) — after a program ends, the oven's connectivity board stops refreshing the cavity temperature in its status snapshots. The stale value persists in the Smeg cloud until the next program start or a power cycle; the SmegConnect apps are unaffected only because they never display cavity temperature outside an active program. The integration handles this: the reading is trusted during the program and for 90 minutes after it ends (covering the real cool-down), then reported as `unknown` with the last trusted value kept in the `last_accurate_value` attribute. Trust resumes automatically when a new program starts, the value changes, or the connectivity board reboots.
 
 ---
 
 ## Planned / In Progress
 
-- **Blast chiller program select** — 10 named chilling programs (Blast Chilling, Freezing, Drinks Cooling, etc.) with confirmed program IDs; implementation in progress
 - **Dishwasher support** — entity definitions and field mappings from APK analysis are complete; needs testing with a real device
 - **Wine cooler support** — single and dual-zone models planned; needs testing with a real device
 - **HACS default store submission** — planned once the integration reaches broader stability

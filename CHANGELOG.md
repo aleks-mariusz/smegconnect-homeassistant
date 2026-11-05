@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.3 — 2026-11-05
+
+### Corrected sensors
+
+- Fix **Cooking Remaining Time** showing wrong (near-zero) values during a
+  cook. `currSeqDuration` is a live countdown of the remaining time, not the
+  sequence total — the firmware decrements it as the cook progresses
+  (`duration + elapsed` stays equal to the configured step duration, and the
+  Smeg app computes "ready at" as now + `currSeqDuration`). The sensor now
+  reports the countdown as-is instead of subtracting elapsed time a second
+  time, which reached 0 at the cook's halfway point. Outside an active cook
+  the sensor reports `unknown` instead of 0 s.
+- Suppress the oven's **frozen cavity temperature** in standby (firmware
+  defect: the connectivity board stops refreshing `currTempOven` after a
+  program ends). The reading is trusted while a program runs and for a
+  90-minute cool-down window after it ends, then reported as `unknown` with
+  the last trusted value in the `last_accurate_value` attribute. Trust
+  resumes when a new program starts, the value changes, or the connectivity
+  board reboots. The oven climate entity's current temperature applies the
+  same suppression.
+
 ## 0.2.2 — 2026-10-17
 
 ### Reliable state updates
