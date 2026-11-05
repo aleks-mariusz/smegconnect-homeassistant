@@ -440,14 +440,20 @@ class SmegSensorEntity(SmegEntity, SensorEntity):
                 return "None"
 
         # --- Cooking remaining time ---
+        # currSeqDuration is NOT the sequence total: the firmware decrements it
+        # live as the cook progresses (observed: duration + currSeqElapsedTime ==
+        # configured step duration throughout a cook, and the Smeg app computes
+        # "ready at" as now + currSeqDuration). The countdown value itself is the
+        # remaining time — subtracting elapsed double-counts and reaches 0 at the
+        # cook's halfway point. 0 outside an active cook reports as unknown.
         if key == "cook_remaining":
             if value is None:
                 return None
-            elapsed = self._state.get("currSeqElapsedTime", 0)
             try:
-                return max(0, int(value) - int(elapsed))
+                remaining = int(value)
             except (TypeError, ValueError):
-                pass
+                return None
+            return remaining or None
 
         # --- Apply value_fn transform (e.g. firmware version decode) ---
         if self.entity_description.value_fn is not None:
