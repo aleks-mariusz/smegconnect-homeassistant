@@ -11,6 +11,7 @@ Run:  python3 tests/test_cavity_temp_staleness.py
 stub harness)
 """
 import ast
+import builtins
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -127,6 +128,52 @@ def main() -> int:
     state = {"currStepCookingPhase": "standby", "CBupTime": 1}
     update(c7, "oven1", state)
     results.append(("S9 missing temp -> no crash, no stale flag", "cavityTempStale" not in state))
+
+    # --- Static check: every name the tracker references must resolve -------
+    # The stub harness above masks module-level name resolution — v0.2.3
+    # shipped a NameError because CAVITY_TEMP_MAX_PLAUSIBLE_STANDBY was used
+    # but never imported. Verify the function only references names that are
+    # defined at coordinator module level, and that .const imports exist.
+    src = SRC.read_text()
+    tree = ast.parse(src)
+    module_names = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            module_names.update((a.asname or a.name).split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module_names.update(a.asname or a.name for a in node.names)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            module_names.update(t.id for t in targets if isinstance(t, ast.Name))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_update_cavity_temp_freshness")
+    local_names = {a.arg for a in ast.walk(fn) if isinstance(a, ast.arg)}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            local_names.add(node.id)
+    referenced = {n.id for n in ast.walk(fn)
+                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    unresolved = referenced - local_names - module_names - set(dir(builtins))
+    results.append(("S10 tracker references resolve at module level", not unresolved))
+    if unresolved:
+        print(f"        unresolved names: {sorted(unresolved)}")
+
+    const_tree = ast.parse((SRC.parent / "const.py").read_text())
+    const_names = set()
+    for node in const_tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            const_names.update(t.id for t in targets if isinstance(t, ast.Name))
+    missing = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "const":
+            missing.update(a.name for a in node.names if a.name not in const_names)
+    results.append(("S11 .const imports all defined in const.py", not missing))
+    if missing:
+        print(f"        missing from const.py: {sorted(missing)}")
 
     passed = sum(1 for _, ok in results if ok)
     for name, ok in results:

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.4 — 2026-11-07
+
+### Fixes
+
+- Fix a `NameError` crash in the cavity-temperature tracker introduced in
+  0.2.3: the `CAVITY_TEMP_MAX_PLAUSIBLE_STANDBY` constant was used but never
+  imported. The crash fired whenever an oven in standby had no freshness
+  tracker yet (typically right after a restart) and dropped both push and
+  REST updates for the appliance — seen as repeated "Smeg WebSocket listener
+  failed" warnings with frozen sensors. Adds static name-resolution tests
+  that verify every name the tracker references is defined at module level
+  and every `.const` import exists (the scenario harness stubs globals and
+  could not catch this class of bug).
+
 ## 0.2.3 — 2026-11-05
 
 ### Corrected sensors
