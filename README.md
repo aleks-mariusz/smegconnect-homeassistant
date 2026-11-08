@@ -4,7 +4,7 @@
 
 An unofficial Home Assistant integration for Smeg smart appliances — ovens, blast chillers, dishwashers, and wine coolers — connected via the SmegConnect cloud platform.
 
-> **Status:** Pre-release / beta. Tested on SOP6606WS2PNR (oven) and SBC4604WNR1 (blast chiller). Reverse-engineered from the SmegConnect and SmegConnect Plus Android apps.
+> **Status:** Pre-release / beta. Tested on SOP6606WS2PNR and SO4606WAPNR (ovens) and SBC4604WNR1 (blast chiller). Reverse-engineered from the SmegConnect and SmegConnect Plus Android apps.
 
 ---
 
