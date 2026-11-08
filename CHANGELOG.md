@@ -1,26 +1,6 @@
 # Changelog
 
-## 0.2.5b2 — 2026-11-08 (beta)
-
-Supersedes 0.2.5b1 (same changes plus the items below; supersedes-tag created
-only as a beta iteration, production 0.2.5 will consolidate).
-
-### New
-
-- The **Panel Clock** diagnostic sensor gains a `clock_source` attribute
-  (e.g. `mains frequency`, `RTC`). This is the decisive diagnostic for oven
-  clock sync: panels running from the internal RTC revert *any* remote clock
-  set within moments — including sets made by the official app — while
-  panels set to *mains frequency* on the appliance display adopt and keep
-  them. Read-only; the source is a panel-side setting the ovens' command
-  catalog does not expose remotely.
-
-### Documented
-
-- README: oven clock-source requirement for `sync_clock`, and the RTC
-  re-assert behaviour under Limitations & Known Issues.
-
-## 0.2.5b1 — 2026-11-08 (beta)
+## 0.2.5 — 2026-11-08
 
 ### New
 
@@ -28,6 +8,13 @@ only as a beta iteration, production 0.2.5 will consolidate).
   It reports the appliance front panel's own time-of-day, so clock drift
   (e.g. the +1 h left behind by a DST change) and the outcome of a clock sync
   are visible in Home Assistant without walking to the appliance.
+- The Panel Clock sensor exposes a **`clock_source` attribute** (e.g.
+  `mains frequency`, `RTC`) — the decisive diagnostic for oven clock sync:
+  panels running from the internal RTC revert *any* remote clock set within
+  moments (including sets made by the official app), while panels set to
+  *mains frequency* on the appliance display adopt and keep them. Read-only;
+  the source is a panel-side setting the ovens' command catalog does not
+  expose remotely.
 
 ### Fixes
 
@@ -45,6 +32,12 @@ only as a beta iteration, production 0.2.5 will consolidate).
   then confirms adoption with two spaced state reads — past the brief state
   echo and past MQTT command latency — and logs a warning telling you to set
   the clock on the appliance display if the panel did not adopt the new time.
+
+### Documented
+
+- README: the oven clock-source requirement for `sync_clock` (panel clock
+  source must be *mains frequency*, not RTC) and the RTC re-assert behaviour
+  under Limitations & Known Issues.
 
 ## 0.2.4 — 2026-11-07
 
