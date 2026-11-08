@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.5b1 — 2026-11-08 (beta)
+
+### New
+
+- New diagnostic **Panel Clock** sensor for every oven and the blast chiller.
+  It reports the appliance front panel's own time-of-day, so clock drift
+  (e.g. the +1 h left behind by a DST change) and the outcome of a clock sync
+  are visible in Home Assistant without walking to the appliance.
+
+### Fixes
+
+- **Clock sync now actually works on ovens.** The cloud accepts a clock
+  command with HTTP 202 regardless, but oven firmware silently drops a
+  `manualClock` value sent as a JSON string (it echoes the value into the
+  device state without applying it — the panel keeps its old clock). Charles
+  captures of the SmegConnect Plus app show the app sends the value typed per
+  data model: a JSON **integer** to ovens, a JSON string to the blast
+  chiller. The integration now matches the app exactly, sends raw
+  seconds-since-local-midnight (no minute rounding), and needs no preamble
+  commands.
+- **`sync_clock` no longer reports success it cannot verify.** It skips
+  appliances whose remote control is off (previously a silent 202 no-op),
+  then confirms adoption with two spaced state reads — past the brief state
+  echo and past MQTT command latency — and logs a warning telling you to set
+  the clock on the appliance display if the panel did not adopt the new time.
+
 ## 0.2.4 — 2026-11-07
 
 ### Fixes

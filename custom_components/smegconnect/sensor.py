@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Callable
 
 from homeassistant.components.sensor import (
@@ -19,6 +20,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from .const import (
     APPLIANCE_CATEGORY_NAMES,
@@ -118,6 +120,23 @@ SENSOR_DESCRIPTIONS: tuple[SmegSensorDescription, ...] = (
         state_field="chiller_alarm_description",
         device_types=(DEVICE_TYPE_BLAST_CHILLER,),
         entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    # -----------------------------------------------------------------------
+    # Shared — panel clock (diagnostic)
+    #
+    # manualClock is the appliance front-panel's own time-of-day (seconds since
+    # midnight, ticking from mains/RTC with no DST awareness). Surfacing it
+    # makes clock drift visible without walking to the appliance and shows
+    # whether a sync_clock send was actually adopted (202 ≠ applied).
+    # -----------------------------------------------------------------------
+    SmegSensorDescription(
+        key="panel_clock",
+        name="Panel Clock",
+        state_field="manualClock",
+        device_types=(DEVICE_TYPE_OVEN, DEVICE_TYPE_BLAST_CHILLER),
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        icon="mdi:clock-outline",
     ),
     # -----------------------------------------------------------------------
     # Shared — Wi-Fi / connectivity (diagnostic)
@@ -356,6 +375,23 @@ SENSOR_DESCRIPTIONS: tuple[SmegSensorDescription, ...] = (
 )
 
 
+def _panel_clock_datetime(raw: Any) -> Any:
+    """Convert manualClock (seconds since local midnight) to an aware datetime.
+
+    Returns None (→ unknown) for missing or out-of-range values. Midnight (0)
+    is a valid time and is kept.
+    """
+    if raw is None:
+        return None
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= seconds < 86400:
+        return None
+    return dt_util.start_of_local_day() + timedelta(seconds=seconds)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -392,6 +428,13 @@ class SmegSensorEntity(SmegEntity, SensorEntity):
     def native_value(self) -> Any:
         value = self._state.get(self.entity_description.state_field)
         key = self.entity_description.key
+
+        # --- Panel clock ---
+        # Anchor the appliance's seconds-since-midnight to today's local
+        # midnight so HA renders a real timestamp; drift against actual time
+        # is then directly visible (and graphable in the recorder).
+        if key == "panel_clock":
+            return _panel_clock_datetime(value)
 
         # --- Cavity temperature (firmware staleness defect) ---
         # The oven CB stops refreshing currTempOven at the standby transition;

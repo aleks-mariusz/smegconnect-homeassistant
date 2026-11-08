@@ -270,6 +270,11 @@ CMD_TEMP_FORMAT = "tempFormatFeature"      # param: tempFormat; oven="°C"/"°F"
 CMD_HOUR_FORMAT = "hourFormatFeature"      # param: hourFormat; oven="24h"/"12h", chiller="0"/"1"
 CMD_WEIGHT_FORMAT = "weightFormatFeature"  # param: weightFormat; oven="kg"/"oz", chiller="0"/"1"
 CMD_MANUAL_CLOCK = "manualClockFeature"
+# Parameter typing is per data model (app capture evidence):
+#   ovens (dm 2306/2818): JSON integer seconds-since-local-midnight
+#   blast chiller (dm 3332): JSON string; coerces either way
+# No preamble is needed — the app sends this command bare, even as the very
+# first command of a session, and the ovens adopt it.
 
 # Blast chiller command codes (confirmed from SmegConnect Plus live capture)
 CMD_CHILLER_APPL = "applRemCmdFeature"     # blast chiller on/off; param: applRemCmd, "1"/"0"
