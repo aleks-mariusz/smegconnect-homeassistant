@@ -193,6 +193,8 @@ Synchronises the appliance's internal clock to Home Assistant's current time. Th
 
 No fields required — the handler computes the current time automatically.
 
+**Ovens — set the panel's clock source to "mains frequency".** An oven whose panel clock runs from the internal RTC re-asserts that clock and reverts any remote set within moments (this includes sets made by the official SmegConnect Plus app). With the clock source set to *mains frequency* on the appliance display (Settings → Clock), the panel adopts remote clock sets and they stick. The **Panel Clock** diagnostic sensor exposes the panel's current source as its `clock_source` attribute, so you can check at a glance why a sync did not take. The blast chiller has no such restriction.
+
 ---
 
 ## Firmware Version Diagnostics
@@ -263,6 +265,7 @@ All 80 SmegConnect/SmegConnect Plus supported models are in the integration's ca
 - **PARSW number** (e.g. PARSW0436) — this is static ADF metadata not returned by the live API; only the PARSW version number is available.
 - **Firmware upgrade status** — no sensor for pending OTA updates; planned for a future release.
 - **Cavity temperature freezes in standby** (oven firmware defect) — after a program ends, the oven's connectivity board stops refreshing the cavity temperature in its status snapshots. The stale value persists in the Smeg cloud until the next program start or a power cycle; the SmegConnect apps are unaffected only because they never display cavity temperature outside an active program. The integration handles this: the reading is trusted during the program and for 90 minutes after it ends (covering the real cool-down), then reported as `unknown` with the last trusted value kept in the `last_accurate_value` attribute. Trust resumes automatically when a new program starts, the value changes, or the connectivity board reboots.
+- **Oven panel clock reverts remote sets when clock source is "RTC"** — the panel re-derives its time from the internal RTC and overwrites any remotely commanded clock within moments. Set the panel's clock source to *mains frequency* (on the appliance display) for remote clock sync to work; see the `sync_clock` service above and the Panel Clock sensor's `clock_source` attribute.
 
 ---
 

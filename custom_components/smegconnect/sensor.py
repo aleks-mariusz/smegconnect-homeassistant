@@ -510,6 +510,15 @@ class SmegSensorEntity(SmegEntity, SensorEntity):
 
         Only ovens carry the tracker fields; other devices get no attributes.
         """
+        if self.entity_description.key == "panel_clock":
+            # The panel's clock source decides whether remote clock sync can
+            # work at all: "RTC" panels re-assert their internal clock and
+            # revert remote sets within moments; "mains frequency" panels
+            # adopt them. Read-only — the source is a panel-side setting the
+            # ovens' command catalog does not expose remotely.
+            source = self._state.get("manualClockSource")
+            return {"clock_source": source} if source is not None else None
+
         if self.entity_description.key != "cavity_temperature":
             return None
         if "cavityTempStale" not in self._state and "cavityTempLastAccurate" not in self._state:

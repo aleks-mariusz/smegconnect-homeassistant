@@ -284,6 +284,8 @@ if "SensorDeviceClass.TIMESTAMP" not in sensor_src.split("panel_clock")[1][:400]
     failures.append("sensor.py: panel_clock must be a TIMESTAMP device class")
 if "EntityCategory.DIAGNOSTIC" not in sensor_src.split("panel_clock")[1][:400]:
     failures.append("sensor.py: panel_clock must be diagnostic category")
+if '"clock_source"' not in sensor_src or "manualClockSource" not in sensor_src:
+    failures.append("sensor.py: panel_clock must expose the clock_source attribute")
 
 assert_names_resolve(SERVICES, [
     "_remote_control_on", "_seconds_of_day", "_clock_param_value",
