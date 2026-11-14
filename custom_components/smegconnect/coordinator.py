@@ -41,6 +41,9 @@ from .const import (
     CAVITY_TEMP_STALE_GRACE,
     DEVICE_TYPE_BLAST_CHILLER,
     DEVICE_TYPE_OVEN,
+    FAILURE_LABEL_NONE,
+    OVEN_BIT_MAP,
+    OVEN_INT_STRING_MAPS,
 )
 from .websocket import SmegWebSocket
 
@@ -136,8 +139,9 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 if generation != self._push_generation.get(code, 0):
                     continue
                 state = info.get("highLevelDeviceStatus", {}).get("status", {})
-                if self.data[code].get("deviceTypeId") == DEVICE_TYPE_BLAST_CHILLER:
-                    state = self._apply_blast_chiller_bit_map(state)
+                state = self._transform_state(
+                    self.data[code].get("deviceTypeId"), state
+                )
                 self._update_cavity_temp_freshness(code, state)
                 self.data[code]["state"] = state
             except SmegApiError as err:
@@ -211,10 +215,19 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._stomp_failures = 0
         self._last_ws_message = monotonic()
         self._push_generation[device_code] = self._push_generation.get(device_code, 0) + 1
-        if self.data[device_code].get("deviceTypeId") == DEVICE_TYPE_BLAST_CHILLER:
-            status = self._apply_blast_chiller_bit_map(status)
-        self._update_cavity_temp_freshness(device_code, status)
-        self.data[device_code]["state"] = status
+        # Pushes carry a DELTA — only the fields that changed (plus
+        # cloudConnected on every push) — so merge over the last known state
+        # instead of replacing it. Replacing wiped every absent field until
+        # the next 60s REST poll: a busy oven pushing ~every 2s made entities
+        # flicker unavailable/unknown, and once ovens moved to the raw model
+        # (no friendly fields in the delta at all) they never recovered.
+        base_state = self.data[device_code].get("state") or {}
+        merged = {**base_state, **status}
+        merged = self._transform_state(
+            self.data[device_code].get("deviceTypeId"), merged
+        )
+        self._update_cavity_temp_freshness(device_code, merged)
+        self.data[device_code]["state"] = merged
         # async_set_updated_data resets the REST timer on every push: a chatty
         # device would starve reconciliation for another device missing pushes.
         self.last_update_success = True
@@ -370,6 +383,80 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         state["cavityTempLastAccurate"] = tracker.get("last_accurate", temp)
 
     @staticmethod
+    def _transform_state(type_id: Any, state: dict[str, Any]) -> dict[str, Any]:
+        """Apply the per-device-type raw-model transform, if any.
+
+        Ovens: Smeg migrated them to the Plus-era raw data model between
+        2026-10-17 and 2026-11-11 (see OVEN_BIT_MAP in const.py) — friendly
+        field names now have to be synthesised client-side, exactly like the
+        blast chiller's bit arrays always had to be.
+        """
+        if type_id == DEVICE_TYPE_BLAST_CHILLER:
+            return SmegCoordinator._apply_blast_chiller_bit_map(state)
+        if type_id == DEVICE_TYPE_OVEN:
+            return SmegCoordinator._apply_oven_status_transform(state)
+        return state
+
+    @staticmethod
+    def _apply_oven_status_transform(state: dict[str, Any]) -> dict[str, Any]:
+        """Synthesise the v1 friendly status fields from the oven raw model.
+
+        Smeg migrated ovens to the Plus-era raw data model between 2026-10-17
+        and 2026-11-11: /info and STOMP pushes stopped carrying "appl",
+        "doorState", "childlock", … and now serve ~528 raw fields
+        (applState1_*/applState2_* bits, int enums). The SmegConnect Plus app
+        decodes these client-side (OvenStatusTransformer.java /
+        KmpOvenAttributes.java); this reproduces the v1 strings so the
+        existing entity descriptors keep working. Mapping evidence is
+        documented on OVEN_BIT_MAP / OVEN_INT_STRING_MAPS in const.py.
+
+        Idempotent: safe to re-run on every merged push delta.
+        """
+        # 1. Bit fields → v1 string fields.
+        for raw_field, (alias, on_value, off_value) in OVEN_BIT_MAP.items():
+            if raw_field in state:
+                state[alias] = on_value if state[raw_field] == 1 else off_value
+
+        # 2. Target temperature: raw model renamed it currStepTargetTempSetState.
+        if "currStepTargetTempSetState" in state:
+            state["currStepTargetTempSet"] = state["currStepTargetTempSetState"]
+
+        # 3. Int enum fields → v1 strings. Only when actually an int: a
+        # pre-migration string payload (or an unmapped int) passes through.
+        for field, value_map in OVEN_INT_STRING_MAPS.items():
+            value = state.get(field)
+            if isinstance(value, int) and not isinstance(value, bool):
+                if value in value_map:
+                    state[field] = value_map[value]
+
+        # 4. Firmware-typo part-number/temperature fields: the raw model serves
+        # the correctly-spelled names (as the chiller always did); entities read
+        # the oven's historical typo'd fields.
+        if "CBpartNumber" in state:
+            state["CBpartlNumber"] = state["CBpartNumber"]
+        if "CBtemperature" in state:
+            state["CBtemperaure"] = state["CBtemperature"]
+
+        # 5. Error fields: failureCode/failureLabel are gone from the raw model.
+        # There is no verified oven alarm decoder (the Plus app has none for
+        # ovens; individual alarmStatus2_* bits are set to 1 even in the healthy
+        # snapshot). Synthesise the healthy sentinel only when alarmLast == 0 —
+        # the one state observed in BOTH models (0 alongside failureCode=0 /
+        # failureLabel="notification.none" pre-migration, and today). When
+        # alarmLast != 0 the fields are left absent so entities show Unknown
+        # rather than a false "None"/off on a problem sensor.
+        if "failureCode" not in state and "failureLabel" not in state:
+            try:
+                alarm_last = int(state.get("alarmLast", 0))
+            except (TypeError, ValueError):
+                alarm_last = 0
+            if alarm_last == 0:
+                state["failureCode"] = 0
+                state["failureLabel"] = FAILURE_LABEL_NONE
+
+        return state
+
+    @staticmethod
     def _apply_blast_chiller_bit_map(state: dict[str, Any]) -> dict[str, Any]:
         """Translate raw applState2_* bits to logical named fields for blast chillers.
 
@@ -427,8 +514,7 @@ class SmegCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             existing_state = self.data.get(code, {}).get("state", {})
             state = info.get("highLevelDeviceStatus", {}).get("status", existing_state)
             type_id = dev.get("deviceTypeId", 0)
-            if type_id == DEVICE_TYPE_BLAST_CHILLER:
-                state = self._apply_blast_chiller_bit_map(state)
+            state = self._transform_state(type_id, state)
             self.data[code] = {
                 **dev,
                 "state": state,

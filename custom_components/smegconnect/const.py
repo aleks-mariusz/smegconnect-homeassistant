@@ -320,6 +320,73 @@ BLAST_CHILLER_ALARM_MAP: list[tuple[str, int, str]] = [
     ("alarmStatus2", 10, "Display and touch fault"),
 ]
 
+# Oven raw-model bit → (friendly field, value when 1, value when 0).
+#
+# Between 2026-10-17 and 2026-11-11 Smeg migrated ovens to the Plus-era raw
+# data model: /api/v1/devices/{code}/info and STOMP pushes now serve ~528 raw
+# fields (applState1_*/applState2_* bits, int enums) instead of the friendly
+# names the integration was built on ("appl", "doorState", "childlock", …).
+# All the old data still exists — the SmegConnect Plus app decodes it
+# client-side. This map reproduces the OLD v1 status strings so the existing
+# entity descriptors keep working.
+#
+# Sources (decompiled SmegConnect Plus APK, verified against live captures
+# 2026-11-14 — see captures/evidence-20261114-oven-model-migration/):
+#   - OvenStatusTransformer.java: which applState bits are meaningful
+#   - KmpOvenAttributes.java: DOOR_OPEN_STATE = applState1_002, DOOR_LOCK =
+#     applState1_004, DEMO_MODE (typo'd constant "applState2_0015"; the
+#     transformer's key "applState2_015" is the real field)
+#   - live bit toggling (door open/close, power) + healthy-snapshot parity
+#     with the pre-migration v1 payload
+# Bit value semantics: 1 = active (door OPEN, childlock engaged, light on).
+#
+# ecoLogic has NO bit mapping anywhere in the Plus app (OvenStatusTransformer
+# does not rename it; KmpOvenAttributes has no constant) — deliberately not
+# synthesised; the Eco Heating Mode switch will show Unknown until a real
+# bit index is captured.
+OVEN_BIT_MAP: dict[str, tuple[str, str, str]] = {
+    "applState1_000": ("appl",       "ON",   "OFF"),
+    "applState1_001": ("light",      "ON",   "OFF"),
+    "applState1_002": ("doorState",  "OPEN", "CLOSE"),
+    "applState2_001": ("childlock",  "ON",   "OFF"),
+    "applState2_007": ("soundActiv", "ON",   "OFF"),
+    "applState2_009": ("keepWarm",   "ON",   "OFF"),
+    "applState2_011": ("ecoLight",   "ON",   "OFF"),
+    "applState2_013": ("digClock",   "ON",   "OFF"),
+}
+
+# Fields the raw model serves as ints where the v1 model served strings.
+# Only converted when the value is an int (a pre-migration string payload, or
+# an unknown int, passes through untouched — no invented semantics).
+#
+# currStepCookingPhase sources:
+#   - 0 = standby: verified live (idle oven; matches v1 "standby" snapshot)
+#   - 1 = "waiting delay", 6 = "end of cooking": OngoingCycleHelper.java maps
+#     phase 1 → OngoingComponentType.Scheduled and 6 → Completed for ovens
+#   - 2,3,4,5,7,8,9,10,14,15,16,17 = "cooking": the same helper treats these
+#     as the oven's Ongoing (active-cycle) set; 2 was verified live as active
+#     heating on the OmniChef mid-cook. The v1 model distinguished finer
+#     phases ("preheat", "keep warm", …) but no per-int mapping exists —
+#     they all collapse to "cooking".
+#   - any other int: passes through unconverted (Unknown in HA)
+# Format maps cross-checked against the blast chiller's int encoding
+# (select.py state_map, confirmed from a live SmegConnect Plus command
+# capture: tempFormat value "0" = °C) and the v1 oven strings.
+OVEN_INT_STRING_MAPS: dict[str, dict[int, str]] = {
+    "tempFormat":  {0: "°C", 1: "°F"},
+    "hourFormat":  {0: "24h", 1: "12h"},
+    "weightFormat": {0: "kg", 1: "oz"},
+    "ovenBusy":    {1: "oven busy", 0: "oven not busy"},
+    "currStepCookingPhase": {
+        0: "standby",
+        1: "waiting delay",
+        6: "end of cooking",
+        2: "cooking", 3: "cooking", 4: "cooking", 5: "cooking",
+        7: "cooking", 8: "cooking", 9: "cooking", 10: "cooking",
+        14: "cooking", 15: "cooking", 16: "cooking", 17: "cooking",
+    },
+}
+
 # Error strings from Smeg S3 labels CDN (smeg-connect-config-app-prod.s3.eu-central-1.amazonaws.com)
 # Maps failureCode integer → human-readable description for oven errors.
 # Codes 1-9 = Err1-Err9, 10 = Err10, 0xA-0xF = ErrA-ErrF (1-indexed hex digits).
